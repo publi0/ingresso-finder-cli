@@ -3,8 +3,8 @@
 ### Use o Ingresso.com diretamente do terminal 
 
 ### Features
-- Buscar Ingressos por Cidade
-- Buscar Ingressos por Filme 
+- Buscar Sessões por Cidade
+- Buscar Sessões por Filme 
 
 ### How to Use
 
