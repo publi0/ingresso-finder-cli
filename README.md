@@ -1,4 +1,4 @@
-## Ingresso CLI
+## Ingresso.com CLI
 
 ### Use o Ingresso.com diretamente do terminal 
 
