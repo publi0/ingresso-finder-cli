@@ -1,22 +1,70 @@
-## Ingresso.com CLI
+# Ingresso Finder CLI
 
-### Use o Ingresso.com diretamente do terminal 
+TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com histórico local e cache para acelerar as consultas.
 
-### Features
-- Buscar Sessões por Cidade
-- Buscar Sessões por Filme 
+![Demo](assets/demo.gif)
 
-### How to Use
+## Visão Geral
 
-<img src="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExaDVrb2x3d3RreXR4MDZiNTBoZWFyeXB3N2MxdjR4NWdobmV4c3h1aSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/UzGtbRPXqVYxeHqh12/giphy.gif" />
+- Fluxo guiado: cidade → cinema → filmes → sessões.
+- Busca incremental em todas as listas.
+- Cache local para reduzir chamadas repetidas.
+- Mapa de assentos quando o endpoint público está disponível.
 
-#### help
-```shell
-./main --help
+## Requisitos
+
+- Go 1.25+
+
+## Instalação
+
+### Homebrew (tap)
+
+```bash
+brew tap publi0/ingresso-finder-cli
+brew install publi0/ingresso-finder-cli/ingresso-finder-cli
 ```
-<img width="623" alt="image" src="https://github.com/publi0/ingresso-finder-cli/assets/14155185/1ffe8265-2f1d-4817-885c-9a8b19599975">
 
-### Backlog
-- Flags opcionais para acelerar o uso
-- Buscador de melhor sessão e lugar para determinado filme (talvez usar API da openAI)
-- Tratar melhor casos de erro
+### Build local
+
+```bash
+go build -o ingresso
+```
+
+## Uso
+
+```bash
+./ingresso
+```
+
+## Exemplos de comandos
+
+```bash
+# executa direto do binário
+./ingresso
+
+# define cidade inicial
+INGRESSO_CITY="Sao Paulo" ./ingresso
+
+# roda sem build (modo desenvolvimento)
+INGRESSO_CITY="Rio de Janeiro" go run .
+```
+
+## Configuração
+
+- `INGRESSO_CITY` define a cidade inicial e pula a tela de seleção.
+
+## Atalhos
+
+- `q` ou `ctrl+c` para sair.
+- `esc` para voltar.
+- Digitar já filtra a lista atual.
+- `ctrl+d` abre o seletor de data nas telas de cidades/cinemas/filmes/sessões.
+- `enter` abre o checkout no navegador na tela de sessões.
+- `tab` abre o mapa de assentos quando disponível.
+- `n` alterna o modo de exibição de números no mapa de assentos.
+
+## Desenvolvimento
+
+```bash
+go test ./...
+```

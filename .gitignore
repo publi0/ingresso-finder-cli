@@ -1,1 +1,23 @@
+# Binaries
+/ingresso
+/main
 /app/main
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test / coverage
+*.test
+*.out
+/coverage.out
+/coverage.txt
+
+# Build artifacts
+/bin/
+/dist/
+
+# OS / tooling
+.DS_Store
+.codex/
