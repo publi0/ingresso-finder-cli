@@ -24,8 +24,6 @@ brew tap publi0/ingresso-finder-cli https://github.com/publi0/ingresso-finder-cl
 brew install publi0/ingresso-finder-cli/ingresso-finder-cli
 ```
 
-Obs.: o formato curto `brew tap publi0/ingresso-finder-cli` só funciona se o repositório no GitHub se chamar `homebrew-ingresso-finder-cli`.
-
 ### Build local
 
 ```bash
@@ -35,6 +33,10 @@ go build -o ingresso
 ## Uso
 
 ```bash
+# via Homebrew
+ingresso
+
+# build local
 ./ingresso
 ```
 
@@ -42,10 +44,10 @@ go build -o ingresso
 
 ```bash
 # executa direto do binário
-./ingresso
+ingresso
 
 # define cidade inicial
-INGRESSO_CITY="Sao Paulo" ./ingresso
+INGRESSO_CITY="Sao Paulo" ingresso
 
 # roda sem build (modo desenvolvimento)
 INGRESSO_CITY="Rio de Janeiro" go run .

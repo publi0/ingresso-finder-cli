@@ -1,10 +1,10 @@
 class IngressoFinderCli < Formula
   desc "Use ingresso.com directly from the terminal"
   homepage "https://github.com/publi0/ingresso-finder-cli"
-  commit = "93476c57696be633880473b0e2f6bea659c5f777"
-  url "https://codeload.github.com/publi0/ingresso-finder-cli/tar.gz/#{commit}"
-  sha256 "7a283842fd57c61cdb54a03535c89f90f0cc2b91a5d0507cfee8a1841e80d456"
-  version "0.0.0-#{commit[0,7]}"
+  COMMIT = "eed75a56e08da9cb774d34b6ee6252e230f9e8fd"
+  url "https://codeload.github.com/publi0/ingresso-finder-cli/tar.gz/#{COMMIT}"
+  sha256 "c88a4e37893937dd03df29d78747ef15d85129a0ca8e64b83b2885fee8b3716a"
+  version "0.0.0-#{COMMIT[0,7]}"
 
   depends_on "go" => :build
 
@@ -12,13 +12,13 @@ class IngressoFinderCli < Formula
     ldflags = %W[
       -s -w
       -X main.version=#{version}
-      -X main.commit=#{commit}
+      -X main.commit=#{COMMIT}
     ]
 
-    system "go", "build", *std_go_args(ldflags: ldflags)
+    system "go", "build", *std_go_args(output: bin/"ingresso", ldflags: ldflags)
   end
 
   test do
-    assert_match "ingresso-finder-cli", shell_output("#{bin}/ingresso-finder-cli --version")
+    assert_match "ingresso", shell_output("#{bin}/ingresso --version")
   end
 end
