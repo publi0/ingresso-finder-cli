@@ -20,9 +20,11 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 ### Homebrew (tap)
 
 ```bash
-brew tap publi0/ingresso-finder-cli
+brew tap publi0/ingresso-finder-cli https://github.com/publi0/ingresso-finder-cli
 brew install publi0/ingresso-finder-cli/ingresso-finder-cli
 ```
+
+Obs.: o formato curto `brew tap publi0/ingresso-finder-cli` só funciona se o repositório no GitHub se chamar `homebrew-ingresso-finder-cli`.
 
 ### Build local
 
