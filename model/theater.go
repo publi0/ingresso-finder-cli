@@ -10,6 +10,10 @@ type Theater struct {
 	City         string `json:"city"`
 	Uf           string `json:"uf"`
 	UrlKey       string `json:"urlKey"`
+	Geolocation  struct {
+		Lat float64 `json:"lat"`
+		Lng float64 `json:"lng"`
+	} `json:"geolocation"`
 }
 
 type TheaterSessionDay struct {

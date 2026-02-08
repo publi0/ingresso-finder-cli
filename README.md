@@ -7,8 +7,12 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 ## Visão Geral
 
 - Fluxo guiado: cidade → cinema → filmes → sessões.
+- Opção alternativa: buscar por filme em todos os cinemas visíveis.
 - Busca incremental em todas as listas.
 - Cache local para reduzir chamadas repetidas.
+- Retry automático com backoff para erros transitórios da API.
+- Preferências globais de visibilidade de cinemas (mostrar/ocultar).
+- Ordenação por proximidade usando localização nativa do sistema (quando disponível), com fallback por IP.
 - Mapa de assentos quando o endpoint público está disponível.
 
 ## Requisitos
@@ -56,6 +60,7 @@ INGRESSO_CITY="Rio de Janeiro" go run .
 ## Configuração
 
 - `INGRESSO_CITY` define a cidade inicial e pula a tela de seleção.
+- `INGRESSO_LOCATION_DEBUG=1` imprime no stderr o motivo de fallback de localização (quando a API nativa falha).
 
 ## Atalhos
 
@@ -63,9 +68,15 @@ INGRESSO_CITY="Rio de Janeiro" go run .
 - `esc` para voltar.
 - Digitar já filtra a lista atual.
 - `ctrl+d` abre o seletor de data nas telas de cidades/cinemas/filmes/sessões.
+- `ctrl+f` (na tela de cinemas) inicia o modo "filme em todos os cinemas visíveis".
+- `ctrl+l` detecta sua localização usando API nativa do sistema (com fallback por IP), exibe a origem usada e ordena cinemas por proximidade.
+- `ctrl+t` abre a tela de gestão de cinemas visíveis/ocultos.
+- `enter` (na tela de gestão) alterna entre mostrar/ocultar um cinema.
+- `x` (na tela de gestão) também alterna mostrar/ocultar um cinema.
 - `enter` abre o checkout no navegador na tela de sessões.
 - `tab` abre o mapa de assentos quando disponível.
 - `n` alterna o modo de exibição de números no mapa de assentos.
+- Em erros de "sem sessões", `enter` tenta automaticamente o próximo dia e `ctrl+d` abre o seletor para escolher qualquer data.
 
 ## Desenvolvimento
 

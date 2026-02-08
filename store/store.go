@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,6 +44,10 @@ type RecentTheater struct {
 
 type theaterHistory struct {
 	Theaters []RecentTheater `json:"theaters"`
+}
+
+type theaterVisibility struct {
+	HiddenByCity map[string][]string `json:"hidden_by_city"`
 }
 
 func LoadCityCache() ([]model.City, bool, error) {
@@ -201,6 +206,65 @@ func RememberTheater(cityID string, theater model.Theater) error {
 	return saveRecentTheaters(next)
 }
 
+func LoadHiddenTheaters(cityID string) (map[string]bool, error) {
+	result := map[string]bool{}
+	if strings.TrimSpace(cityID) == "" {
+		return result, nil
+	}
+
+	visibility, err := loadTheaterVisibility()
+	if err != nil {
+		return nil, err
+	}
+	for _, theaterID := range visibility.HiddenByCity[cityID] {
+		if theaterID != "" {
+			result[theaterID] = true
+		}
+	}
+	return result, nil
+}
+
+func SetTheaterHidden(cityID string, theaterID string, hidden bool) error {
+	cityID = strings.TrimSpace(cityID)
+	theaterID = strings.TrimSpace(theaterID)
+	if cityID == "" || theaterID == "" {
+		return errors.New("city id and theater id are required")
+	}
+
+	visibility, err := loadTheaterVisibility()
+	if err != nil {
+		return err
+	}
+	if visibility.HiddenByCity == nil {
+		visibility.HiddenByCity = map[string][]string{}
+	}
+
+	current := visibility.HiddenByCity[cityID]
+	index := -1
+	for i, id := range current {
+		if id == theaterID {
+			index = i
+			break
+		}
+	}
+
+	if hidden {
+		if index < 0 {
+			current = append(current, theaterID)
+		}
+	} else if index >= 0 {
+		current = append(current[:index], current[index+1:]...)
+	}
+
+	if len(current) == 0 {
+		delete(visibility.HiddenByCity, cityID)
+	} else {
+		sort.Strings(current)
+		visibility.HiddenByCity[cityID] = current
+	}
+	return saveTheaterVisibility(visibility)
+}
+
 func loadCache[T any](path string) (cacheEnvelope[T], error) {
 	var cache cacheEnvelope[T]
 	data, err := os.ReadFile(path)
@@ -257,6 +321,44 @@ func saveRecentTheaters(theaters []RecentTheater) error {
 	}
 	history := theaterHistory{Theaters: theaters}
 	payload, err := json.MarshalIndent(history, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, payload, 0o644)
+}
+
+func loadTheaterVisibility() (theaterVisibility, error) {
+	path, err := configPath("theater_visibility.json")
+	if err != nil {
+		return theaterVisibility{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return theaterVisibility{HiddenByCity: map[string][]string{}}, nil
+		}
+		return theaterVisibility{}, err
+	}
+
+	var visibility theaterVisibility
+	if err := json.Unmarshal(data, &visibility); err != nil {
+		return theaterVisibility{}, errors.New("invalid theater visibility format")
+	}
+	if visibility.HiddenByCity == nil {
+		visibility.HiddenByCity = map[string][]string{}
+	}
+	return visibility, nil
+}
+
+func saveTheaterVisibility(visibility theaterVisibility) error {
+	path, err := configPath("theater_visibility.json")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	payload, err := json.MarshalIndent(visibility, "", "  ")
 	if err != nil {
 		return err
 	}

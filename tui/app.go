@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -34,6 +36,7 @@ const (
 	stateLoadingSeatMap
 	stateSelectSection
 	stateShowSeatMap
+	stateManageTheaters
 	stateError
 )
 
@@ -60,6 +63,7 @@ type appModel struct {
 
 	cityList    list.Model
 	theaterList list.Model
+	theaterPref list.Model
 	movieList   list.Model
 	sessionList list.Model
 	sectionList list.Model
@@ -73,10 +77,19 @@ type appModel struct {
 	spinner spinner.Model
 
 	seatCounts map[string]seatCount
+
+	hiddenTheaters      map[string]bool
+	userLocation        *service.UserLocation
+	browsingAllTheaters bool
+
+	errorSuggestNextDay bool
 }
 
 type errMsg struct {
-	err error
+	err            error
+	returnState    appState
+	returnStateSet bool
+	suggestNextDay bool
 }
 
 type citiesMsg struct {
@@ -114,6 +127,25 @@ type seatMapMsg struct {
 	err     error
 }
 
+type movieCatalogMsg struct {
+	movies     []movieAggregate
+	err        error
+	failed     int
+	ignored    int
+	noSessions bool
+}
+
+type locationMsg struct {
+	location service.UserLocation
+	err      error
+}
+
+type theaterSessionsResult struct {
+	theater model.Theater
+	days    []model.TheaterSessionDay
+	err     error
+}
+
 func New() tea.Model {
 	client := service.NewClient(nil)
 	m := appModel{
@@ -123,7 +155,8 @@ func New() tea.Model {
 	}
 
 	m.cityList = newList("Select City")
-	m.theaterList = newList("Select Theater")
+	m.theaterList = newList("Theaters")
+	m.theaterPref = newList("Visible Theaters")
 	m.movieList = newList("Select Movie")
 	m.sessionList = newList("Sessions")
 	m.sectionList = newList("Select Section")
@@ -131,6 +164,7 @@ func New() tea.Model {
 
 	m.showSeatNumbers = true
 	m.seatCounts = make(map[string]seatCount)
+	m.hiddenTheaters = make(map[string]bool)
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -144,6 +178,9 @@ func (m appModel) Init() tea.Cmd {
 	if cityName := strings.TrimSpace(os.Getenv("INGRESSO_CITY")); cityName != "" {
 		return tea.Batch(m.fetchCityByNameCmd(cityName), m.spinner.Tick)
 	}
+	if recent, ok := startupRecentCity(); ok {
+		return tea.Batch(m.fetchRecentCityCmd(recent), m.spinner.Tick)
+	}
 	return tea.Batch(m.fetchCitiesCmd(), m.spinner.Tick)
 }
 
@@ -153,10 +190,16 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeLists()
+		if m.state == stateShowSessions {
+			return m, m.startSeatCountFetchForVisiblePage()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
 		if m.handleFilterInput(msg) {
+			if m.state == stateShowSessions {
+				return m, m.startSeatCountFetchForVisiblePage()
+			}
 			return m, nil
 		}
 		var handled bool
@@ -175,7 +218,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err
-		m.lastState = m.state
+		if msg.returnStateSet {
+			m.lastState = msg.returnState
+		} else {
+			m.lastState = recoverStateFrom(m.state)
+		}
+		m.errorSuggestNextDay = msg.suggestNextDay
 		m.state = stateError
 		return m, nil
 
@@ -194,6 +242,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.fetchCitiesCmd(), m.spinner.Tick)
 		}
 		m.city = msg.city
+		m.theater = model.Theater{}
+		m.browsingAllTheaters = false
 		_ = store.RememberCity(m.city)
 		m.state = stateLoadingTheaters
 		return m, tea.Batch(m.fetchTheatersCmd(m.city.Id), m.spinner.Tick)
@@ -203,20 +253,50 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, errCmd(msg.err)
 		}
 		m.theaters = msg.theaters
-		m.theaterList.SetItems(buildTheaterItems(msg.theaters, m.city.Id))
+		hidden, err := store.LoadHiddenTheaters(m.city.Id)
+		if err != nil {
+			return m, errCmd(err)
+		}
+		m.hiddenTheaters = hidden
+		m.refreshTheaterLists()
+		m.theaterList.Select(0)
 		m.state = stateSelectTheater
 		return m, nil
 
 	case sessionsMsg:
 		if msg.err != nil {
-			return m, errCmd(msg.err)
+			return m, errWithOptionsCmd(msg.err, stateSelectTheater, false)
 		}
 		m.days = msg.days
 		if len(m.days) == 0 {
-			return m, errCmd(fmt.Errorf("no sessions found for this theater on %s", m.date.Format(time.DateOnly)))
+			return m, errWithOptionsCmd(
+				fmt.Errorf("no sessions found for this theater on %s", m.date.Format(time.DateOnly)),
+				stateSelectTheater,
+				true,
+			)
 		}
+		m.browsingAllTheaters = false
+		m.movieList.Title = "Select Movie"
 		m.movieList.SetItems(buildMovieItems(selectDay(m.days, m.date)))
 		m.state = stateSelectMovie
+		return m, nil
+
+	case movieCatalogMsg:
+		if msg.err != nil {
+			return m, errWithOptionsCmd(msg.err, stateSelectTheater, msg.noSessions)
+		}
+		m.browsingAllTheaters = true
+		m.movieList.Title = "Select Movie • All Theaters"
+		m.movieList.SetItems(buildMovieItemsFromCatalog(msg.movies))
+		m.state = stateSelectMovie
+		return m, nil
+
+	case locationMsg:
+		if msg.err != nil {
+			return m, errCmd(msg.err)
+		}
+		m.userLocation = &msg.location
+		m.refreshTheaterLists()
 		return m, nil
 
 	case seatCountMsg:
@@ -260,10 +340,18 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cityList, cmd = m.cityList.Update(msg)
 	case stateSelectTheater:
 		m.theaterList, cmd = m.theaterList.Update(msg)
+	case stateManageTheaters:
+		m.theaterPref, cmd = m.theaterPref.Update(msg)
 	case stateSelectMovie:
 		m.movieList, cmd = m.movieList.Update(msg)
 	case stateShowSessions:
 		m.sessionList, cmd = m.sessionList.Update(msg)
+		if lazyCmd := m.startSeatCountFetchForVisiblePage(); lazyCmd != nil {
+			if cmd != nil {
+				return m, tea.Batch(cmd, lazyCmd)
+			}
+			return m, lazyCmd
+		}
 	case stateSelectSection:
 		m.sectionList, cmd = m.sectionList.Update(msg)
 	case stateSelectDate:
@@ -281,6 +369,8 @@ func (m appModel) View() string {
 		return header + "\n\n" + m.cityList.View()
 	case stateSelectTheater:
 		return header + "\n\n" + m.theaterList.View()
+	case stateManageTheaters:
+		return header + "\n\n" + m.theaterPref.View()
 	case stateSelectMovie:
 		return header + "\n\n" + m.movieList.View()
 	case stateShowSessions:
@@ -292,6 +382,9 @@ func (m appModel) View() string {
 	case stateSelectDate:
 		return header + "\n\n" + m.dateList.View()
 	case stateError:
+		if m.errorSuggestNextDay {
+			return header + "\n\n" + m.errorRecoveryView()
+		}
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(m.err.Error()) + "\n\n" + hint("Press esc to go back or ctrl+c to quit.")
 	default:
 		return header
@@ -307,7 +400,16 @@ func (m appModel) headerView() string {
 	if m.theater.Name != "" {
 		sub = append(sub, fmt.Sprintf("Theater: %s", m.theater.Name))
 	}
-	if !m.date.IsZero() && (m.state == stateSelectCity || m.state == stateSelectTheater || m.state == stateSelectMovie || m.state == stateShowSessions || m.state == stateSelectDate || m.state == stateShowSeatMap) {
+	if m.browsingAllTheaters {
+		sub = append(sub, "Mode: movie across theaters")
+	}
+	if m.userLocation != nil {
+		label := locationLabel(m.userLocation)
+		if label != "" {
+			sub = append(sub, "Location: "+label)
+		}
+	}
+	if !m.date.IsZero() && (m.state == stateSelectCity || m.state == stateSelectTheater || m.state == stateManageTheaters || m.state == stateSelectMovie || m.state == stateShowSessions || m.state == stateSelectDate || m.state == stateShowSeatMap) {
 		sub = append(sub, fmt.Sprintf("Date: %s", m.date.Format(time.DateOnly)))
 	}
 	if m.state == stateShowSeatMap || m.state == stateSelectSection {
@@ -323,8 +425,14 @@ func (m appModel) headerView() string {
 		meta = "\n" + lipgloss.NewStyle().Faint(true).Render(meta)
 	}
 	hints := "ctrl+c quit • esc back • type to filter • ctrl+d pick date"
+	if m.state == stateSelectTheater {
+		hints = "ctrl+c quit • esc back • type to filter • ctrl+d pick date • enter select • ctrl+f movie across theaters • ctrl+t manage theaters • ctrl+l detect location"
+	}
 	if m.state == stateShowSessions {
 		hints = "ctrl+c quit • esc back • type to filter • ctrl+d pick date • enter open checkout • tab seat map"
+	}
+	if m.state == stateManageTheaters {
+		hints = "ctrl+c quit • esc back • type to filter • enter/x toggle theater visibility"
 	}
 	if m.state == stateSelectDate {
 		hints = "ctrl+c quit • esc back • enter select date"
@@ -341,6 +449,79 @@ func (m appModel) headerView() string {
 	return title + meta + filterLine + "\n" + hint(hints)
 }
 
+func (m appModel) errorRecoveryView() string {
+	nextDate := truncateDate(m.date.AddDate(0, 0, 1))
+	headerChip := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color("63")).
+		Padding(0, 2)
+	actionChip := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("0")).
+		Background(lipgloss.Color("63")).
+		Width(8).
+		Align(lipgloss.Center).
+		Padding(0, 1)
+	actionText := lipgloss.NewStyle().Bold(true)
+
+	title := headerChip.Render("Sem Sessoes")
+	message := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("203")).
+		Bold(true).
+		Render(fmt.Sprintf("Nenhuma sessao foi encontrada para %s.", m.date.Format(time.DateOnly)))
+	sub := hint("Pressione ENTER para tentar no proximo dia (amanha), ou CTRL+D para escolher outra data.")
+
+	enterAction := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		actionChip.Render("ENTER"),
+		"  ",
+		actionText.Render(fmt.Sprintf("Tentar %s (amanha)", nextDate.Format(time.DateOnly))),
+	)
+	dateAction := lipgloss.JoinHorizontal(
+		lipgloss.Top,
+		actionChip.Render("CTRL+D"),
+		"  ",
+		"Escolher qualquer outra data (ex.: amanha)",
+	)
+	footer := hint("ESC voltar • CTRL+C sair")
+
+	content := strings.Join([]string{
+		title,
+		"",
+		message,
+		"",
+		sub,
+		"",
+		enterAction,
+		"",
+		dateAction,
+		"",
+		footer,
+	}, "\n")
+
+	panelStyle := lipgloss.NewStyle().
+		Padding(1, 3).
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		MarginTop(1)
+	if m.width > 56 {
+		cardWidth := m.width - 8
+		if cardWidth > 84 {
+			cardWidth = 84
+		}
+		panelStyle = panelStyle.Width(cardWidth)
+	}
+	panel := panelStyle.Render(content)
+	if m.width > 0 {
+		panel = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)
+	}
+
+	return lipgloss.NewStyle().
+		Padding(0, 1).
+		Render(panel)
+}
+
 func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "ctrl+c", "q":
@@ -349,6 +530,9 @@ func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		if listPtr := m.activeList(); listPtr != nil {
 			if listPtr.SettingFilter() || listPtr.IsFiltered() {
 				listPtr.ResetFilter()
+				if m.state == stateShowSessions {
+					return m, m.startSeatCountFetchForVisiblePage(), true
+				}
 				return m, nil, true
 			}
 		}
@@ -363,14 +547,39 @@ func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		if m.state == stateShowSessions {
 			return m.openSeatMapFromSelection()
 		}
+	case "ctrl+l":
+		if m.state == stateSelectTheater || m.state == stateManageTheaters {
+			return m, m.detectLocationCmd(), true
+		}
+	case "x":
+		if m.state == stateManageTheaters {
+			return m.toggleTheaterVisibility()
+		}
+	case "ctrl+f":
+		if m.state == stateSelectTheater {
+			return m.openMovieAcrossTheaters()
+		}
+	}
+
+	if msg.String() == "ctrl+t" && m.state == stateSelectTheater {
+		m.state = stateManageTheaters
+		m.refreshTheaterLists()
+		return m, nil, true
 	}
 
 	if msg.String() == "ctrl+d" && (m.state == stateSelectCity || m.state == stateSelectTheater || m.state == stateSelectMovie || m.state == stateShowSessions) {
 		m.openDatePicker(m.state)
 		return m, nil, true
 	}
+	if msg.String() == "ctrl+d" && m.state == stateError && m.errorSuggestNextDay {
+		m.openDatePicker(stateShowSessions)
+		return m, nil, true
+	}
 
 	if msg.Type == tea.KeyEnter {
+		if m.state == stateError && m.errorSuggestNextDay {
+			return m.advanceToNextDayFromError()
+		}
 		switch m.state {
 		case stateSelectCity:
 			item, ok := m.cityList.SelectedItem().(cityItem)
@@ -387,6 +596,7 @@ func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			m.theater = item.theater
+			m.browsingAllTheaters = false
 			_ = store.RememberTheater(m.city.Id, m.theater)
 			m.state = stateLoadingSessions
 			return m, tea.Batch(m.fetchSessionsCmd(m.city.Id, m.theater.Id, m.date), m.spinner.Tick), true
@@ -396,13 +606,20 @@ func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			m.sessionList.Title = fmt.Sprintf("Sessions • %s", item.movie.Title)
-			items, sessions := buildSessionItems(item.movie, m.seatCounts)
+			var items []list.Item
+			if len(item.globalSessions) > 0 {
+				items, _ = buildGlobalSessionItems(item.globalSessions, m.seatCounts)
+			} else {
+				items, _ = buildSessionItems(item.movie, m.seatCounts)
+			}
 			m.sessionList.SetItems(items)
 			m.state = stateShowSessions
-			if cmd := m.startSeatCountFetch(sessions); cmd != nil {
+			if cmd := m.startSeatCountFetchForVisiblePage(); cmd != nil {
 				return m, cmd, true
 			}
 			return m, nil, true
+		case stateManageTheaters:
+			return m.toggleTheaterVisibility()
 		case stateShowSessions:
 			item, ok := m.sessionList.SelectedItem().(sessionItem)
 			if !ok {
@@ -424,10 +641,23 @@ func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			m.date = item.date
-			if m.dateReturnStateSet && (m.dateReturnState == stateSelectCity || m.dateReturnState == stateSelectTheater) {
-				m.state = m.dateReturnState
-				m.dateReturnStateSet = false
-				return m, nil, true
+			if m.dateReturnStateSet {
+				switch m.dateReturnState {
+				case stateSelectCity, stateSelectTheater:
+					m.state = m.dateReturnState
+					m.dateReturnStateSet = false
+					return m, nil, true
+				case stateSelectMovie, stateShowSessions:
+					if m.browsingAllTheaters {
+						visible := m.visibleTheaters()
+						if len(visible) == 0 {
+							return m, errCmd(errors.New("no visible theaters selected")), true
+						}
+						m.state = stateLoadingSessions
+						m.dateReturnStateSet = false
+						return m, tea.Batch(m.fetchMovieCatalogCmd(m.city.Id, visible, m.date), m.spinner.Tick), true
+					}
+				}
 			}
 			m.state = stateLoadingSessions
 			m.dateReturnStateSet = false
@@ -462,6 +692,8 @@ func (m appModel) goBack() (tea.Model, tea.Cmd) {
 		m.state = stateSelectTheater
 	case stateShowSessions:
 		m.state = stateSelectMovie
+	case stateManageTheaters:
+		m.state = stateSelectTheater
 	case stateSelectSection:
 		m.state = stateShowSessions
 	case stateShowSeatMap:
@@ -475,6 +707,7 @@ func (m appModel) goBack() (tea.Model, tea.Cmd) {
 		}
 	case stateError:
 		m.state = m.lastState
+		m.errorSuggestNextDay = false
 	default:
 		return m, nil
 	}
@@ -552,6 +785,8 @@ func (m *appModel) activeList() *list.Model {
 		return &m.cityList
 	case stateSelectTheater:
 		return &m.theaterList
+	case stateManageTheaters:
+		return &m.theaterPref
 	case stateSelectMovie:
 		return &m.movieList
 	case stateShowSessions:
@@ -596,8 +831,10 @@ func (m *appModel) resizeLists() {
 	}
 	m.cityList.SetSize(m.width, h)
 	m.theaterList.SetSize(m.width, h)
+	m.theaterPref.SetSize(m.width, h)
 	m.movieList.SetSize(m.width, h)
 	m.sessionList.SetSize(m.width, h)
+	m.sectionList.SetSize(m.width, h)
 	m.dateList.SetSize(m.width, h)
 }
 
@@ -620,7 +857,40 @@ func hint(text string) string {
 
 func errCmd(err error) tea.Cmd {
 	return func() tea.Msg {
-		return errMsg{err: err}
+		return errMsg{
+			err:            err,
+			returnState:    0,
+			returnStateSet: false,
+			suggestNextDay: false,
+		}
+	}
+}
+
+func errWithOptionsCmd(err error, returnState appState, suggestNextDay bool) tea.Cmd {
+	return func() tea.Msg {
+		return errMsg{
+			err:            err,
+			returnState:    returnState,
+			returnStateSet: true,
+			suggestNextDay: suggestNextDay,
+		}
+	}
+}
+
+func recoverStateFrom(state appState) appState {
+	switch state {
+	case stateLoadingCities:
+		return stateSelectCity
+	case stateLoadingTheaters:
+		return stateSelectCity
+	case stateLoadingSessions:
+		return stateSelectTheater
+	case stateLoadingSeatMap:
+		return stateShowSessions
+	case stateError:
+		return stateSelectTheater
+	default:
+		return state
 	}
 }
 
@@ -670,6 +940,56 @@ func (m appModel) fetchCityByNameCmd(name string) tea.Cmd {
 	}
 }
 
+func (m appModel) fetchRecentCityCmd(recent store.RecentCity) tea.Cmd {
+	return func() tea.Msg {
+		if city, ok := cityFromRecentCache(recent); ok {
+			return cityMsg{city: city, err: nil}
+		}
+		if strings.TrimSpace(recent.Name) == "" {
+			return cityMsg{err: errors.New("recent city not found")}
+		}
+		ctx := context.Background()
+		city, err := m.client.GetCityInfoByName(ctx, recent.Name)
+		if err != nil {
+			return cityMsg{err: err}
+		}
+		return cityMsg{city: city, err: nil}
+	}
+}
+
+func startupRecentCity() (store.RecentCity, bool) {
+	recents, err := store.LoadRecentCities()
+	if err != nil || len(recents) == 0 {
+		return store.RecentCity{}, false
+	}
+	recent := recents[0]
+	if strings.TrimSpace(recent.ID) == "" && strings.TrimSpace(recent.Name) == "" {
+		return store.RecentCity{}, false
+	}
+	return recent, true
+}
+
+func cityFromRecentCache(recent store.RecentCity) (model.City, bool) {
+	cached, _, err := store.LoadCityCache()
+	if err != nil || len(cached) == 0 {
+		return model.City{}, false
+	}
+	recentID := strings.TrimSpace(recent.ID)
+	recentName := strings.TrimSpace(recent.Name)
+	recentUF := strings.TrimSpace(recent.UF)
+	for _, city := range cached {
+		if recentID != "" && city.Id == recentID {
+			return city, true
+		}
+		if recentName != "" && strings.EqualFold(city.Name, recentName) {
+			if recentUF == "" || strings.EqualFold(city.Uf, recentUF) {
+				return city, true
+			}
+		}
+	}
+	return model.City{}, false
+}
+
 func (m appModel) fetchCitiesCmd() tea.Cmd {
 	return func() tea.Msg {
 		if cached, fresh, err := store.LoadCityCache(); err == nil && fresh && len(cached) > 0 {
@@ -700,22 +1020,79 @@ func (m appModel) fetchTheatersCmd(cityID string) tea.Cmd {
 
 func (m appModel) fetchSessionsCmd(cityID string, theaterID string, date time.Time) tea.Cmd {
 	return func() tea.Msg {
-		dateKey := date.Format(time.DateOnly)
-		if cached, fresh, err := store.LoadSessionCache(cityID, theaterID, dateKey); err == nil && fresh && len(cached) > 0 {
-			return sessionsMsg{days: cached}
-		}
 		ctx := context.Background()
-		days, err := m.client.GetSessionsByCityAndTheater(ctx, cityID, theaterID, &date)
+		days, err := m.loadSessionsByTheater(ctx, cityID, theaterID, date)
 		if err != nil {
 			if service.IsNotFound(err) {
 				return sessionsMsg{days: nil, err: nil}
 			}
 			return sessionsMsg{days: nil, err: err}
 		}
-		if len(days) > 0 {
-			_ = store.SaveSessionCache(cityID, theaterID, dateKey, days)
-		}
 		return sessionsMsg{days: days, err: err}
+	}
+}
+
+func (m appModel) loadSessionsByTheater(ctx context.Context, cityID string, theaterID string, date time.Time) ([]model.TheaterSessionDay, error) {
+	dateKey := date.Format(time.DateOnly)
+	if cached, fresh, err := store.LoadSessionCache(cityID, theaterID, dateKey); err == nil && fresh && len(cached) > 0 {
+		return cached, nil
+	}
+	days, err := m.client.GetSessionsByCityAndTheater(ctx, cityID, theaterID, &date)
+	if err != nil {
+		return nil, err
+	}
+	if len(days) > 0 {
+		_ = store.SaveSessionCache(cityID, theaterID, dateKey, days)
+	}
+	return days, nil
+}
+
+func (m appModel) fetchMovieCatalogCmd(cityID string, theaters []model.Theater, date time.Time) tea.Cmd {
+	return func() tea.Msg {
+		if len(theaters) == 0 {
+			return movieCatalogMsg{err: errors.New("no theaters available")}
+		}
+
+		ctx := context.Background()
+		out := make(chan theaterSessionsResult, len(theaters))
+		sem := make(chan struct{}, 6)
+		var wg sync.WaitGroup
+
+		for _, theater := range theaters {
+			wg.Add(1)
+			go func(theater model.Theater) {
+				defer wg.Done()
+				sem <- struct{}{}
+				days, err := m.loadSessionsByTheater(ctx, cityID, theater.Id, date)
+				<-sem
+				out <- theaterSessionsResult{theater: theater, days: days, err: err}
+			}(theater)
+		}
+
+		wg.Wait()
+		close(out)
+
+		movies, failed, ignored := aggregateMovieCatalog(out, date, m.userLocation)
+		if len(movies) == 0 {
+			return movieCatalogMsg{
+				err:        fmt.Errorf("no sessions found in visible theaters on %s", date.Format(time.DateOnly)),
+				failed:     failed,
+				ignored:    ignored,
+				noSessions: true,
+			}
+		}
+		return movieCatalogMsg{movies: movies, failed: failed, ignored: ignored}
+	}
+}
+
+func (m appModel) detectLocationCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		location, err := service.DetectCurrentLocation(ctx, nil)
+		if err != nil {
+			return locationMsg{err: fmt.Errorf("failed to detect current location: %w", err)}
+		}
+		return locationMsg{location: location}
 	}
 }
 
@@ -769,29 +1146,46 @@ func isSameDay(a time.Time, b time.Time) bool {
 	return ay == by && am == bm && ad == bd
 }
 
-const maxSeatCountFetches = 30
-
-func (m *appModel) startSeatCountFetch(sessions []model.TheaterSession) tea.Cmd {
-	var cmds []tea.Cmd
-	remaining := maxSeatCountFetches
-	for _, session := range sessions {
-		if !session.HasSeatSelection {
-			continue
-		}
-		if _, ok := m.seatCounts[session.Id]; ok {
-			continue
-		}
-		if remaining <= 0 {
-			break
-		}
-		m.seatCounts[session.Id] = seatCount{}
-		cmds = append(cmds, m.fetchSeatCountCmd(session.Id))
-		remaining--
-	}
-	if len(cmds) == 0 {
+func (m *appModel) startSeatCountFetchForVisiblePage() tea.Cmd {
+	ids := m.pendingSeatCountSessionIDsOnCurrentPage()
+	if len(ids) == 0 {
 		return nil
 	}
+
+	cmds := make([]tea.Cmd, 0, len(ids))
+	for _, id := range ids {
+		m.seatCounts[id] = seatCount{}
+		cmds = append(cmds, m.fetchSeatCountCmd(id))
+	}
 	return tea.Batch(cmds...)
+}
+
+func (m appModel) pendingSeatCountSessionIDsOnCurrentPage() []string {
+	if m.state != stateShowSessions {
+		return nil
+	}
+
+	items := m.sessionList.VisibleItems()
+	if len(items) == 0 {
+		return nil
+	}
+	start, end := m.sessionList.Paginator.GetSliceBounds(len(items))
+	if start < 0 || end > len(items) || start >= end {
+		return nil
+	}
+
+	ids := make([]string, 0, end-start)
+	for _, item := range items[start:end] {
+		si, ok := item.(sessionItem)
+		if !ok || !si.session.HasSeatSelection || si.session.Id == "" {
+			continue
+		}
+		if _, alreadyRequested := m.seatCounts[si.session.Id]; alreadyRequested {
+			continue
+		}
+		ids = append(ids, si.session.Id)
+	}
+	return ids
 }
 
 func (m appModel) fetchSeatCountCmd(sessionID string) tea.Cmd {
@@ -870,6 +1264,18 @@ func computeSeatCounts(seatMap model.SeatMap) seatCount {
 	return result
 }
 
+type sessionWithTheater struct {
+	session     model.TheaterSession
+	theater     model.Theater
+	hasDistance bool
+	distanceKM  float64
+}
+
+type movieAggregate struct {
+	movie    model.TheaterMovie
+	sessions []sessionWithTheater
+}
+
 type cityItem struct {
 	city   model.City
 	recent bool
@@ -897,8 +1303,10 @@ func (c cityItem) FilterValue() string {
 }
 
 type theaterItem struct {
-	theater model.Theater
-	recent  bool
+	theater     model.Theater
+	recent      bool
+	hasDistance bool
+	distanceKM  float64
 }
 
 func (t theaterItem) Title() string {
@@ -906,13 +1314,19 @@ func (t theaterItem) Title() string {
 }
 
 func (t theaterItem) Description() string {
+	parts := []string{}
 	if t.recent {
-		return "Recent"
+		parts = append(parts, "Recent")
 	}
 	if t.theater.Neighborhood != "" {
-		return t.theater.Neighborhood
+		parts = append(parts, t.theater.Neighborhood)
+	} else if t.theater.Address != "" {
+		parts = append(parts, t.theater.Address)
 	}
-	return t.theater.Address
+	if t.hasDistance {
+		parts = append(parts, fmt.Sprintf("%.1f km", t.distanceKM))
+	}
+	return strings.Join(parts, " • ")
 }
 
 func (t theaterItem) FilterValue() string {
@@ -920,8 +1334,9 @@ func (t theaterItem) FilterValue() string {
 }
 
 type movieItem struct {
-	movie model.TheaterMovie
-	count int
+	movie          model.TheaterMovie
+	count          int
+	globalSessions []sessionWithTheater
 }
 
 func (m movieItem) Title() string {
@@ -940,8 +1355,11 @@ func (m movieItem) FilterValue() string {
 }
 
 type sessionItem struct {
-	session model.TheaterSession
-	count   seatCount
+	session     model.TheaterSession
+	theaterName string
+	hasDistance bool
+	distanceKM  float64
+	count       seatCount
 }
 
 func (s sessionItem) Title() string {
@@ -950,6 +1368,9 @@ func (s sessionItem) Title() string {
 	if room == "" {
 		room = "Sala"
 	}
+	if s.theaterName != "" {
+		return fmt.Sprintf("%s • %s • %s", timeLabel, s.theaterName, room)
+	}
 	return fmt.Sprintf("%s • %s", timeLabel, room)
 }
 
@@ -957,6 +1378,10 @@ func (s sessionItem) Description() string {
 	types := formatSessionTypes(s.session.Type)
 	full := formatPrice(s.session.Price)
 	half := formatPrice(halfPrice(s.session.Price))
+	prefix := ""
+	if s.hasDistance {
+		prefix = fmt.Sprintf("%.1f km • ", s.distanceKM)
+	}
 	seatHint := ""
 	if s.session.HasSeatSelection {
 		seatHint = " • seats ..."
@@ -970,11 +1395,50 @@ func (s sessionItem) Description() string {
 			seatHint = " • seats n/a"
 		}
 	}
-	return fmt.Sprintf("%s • Full %s • Half %s%s", types, full, half, seatHint)
+	return fmt.Sprintf("%s%s • Full %s • Half %s%s", prefix, types, full, half, seatHint)
 }
 
 func (s sessionItem) FilterValue() string {
-	return strings.ToLower(strings.Join(append(s.session.Type, s.session.Room), " "))
+	parts := append(s.session.Type, s.session.Room, s.theaterName)
+	return strings.ToLower(strings.Join(parts, " "))
+}
+
+type theaterVisibilityItem struct {
+	theater     model.Theater
+	hidden      bool
+	hasDistance bool
+	distanceKM  float64
+}
+
+func (t theaterVisibilityItem) Title() string {
+	if t.hidden {
+		return fmt.Sprintf("[ ] %s", t.theater.Name)
+	}
+	return fmt.Sprintf("[x] %s", t.theater.Name)
+}
+
+func (t theaterVisibilityItem) Description() string {
+	parts := []string{}
+	if t.theater.Neighborhood != "" {
+		parts = append(parts, t.theater.Neighborhood)
+	}
+	if t.hasDistance {
+		parts = append(parts, fmt.Sprintf("%.1f km", t.distanceKM))
+	}
+	if t.hidden {
+		parts = append(parts, "hidden")
+	} else {
+		parts = append(parts, "visible")
+	}
+	return strings.Join(parts, " • ")
+}
+
+func (t theaterVisibilityItem) FilterValue() string {
+	return strings.ToLower(strings.Join([]string{
+		t.theater.Name,
+		t.theater.Neighborhood,
+		t.theater.Address,
+	}, " "))
 }
 
 func buildCityItems(cities []model.City) []list.Item {
@@ -1021,16 +1485,40 @@ func buildCityItems(cities []model.City) []list.Item {
 	return items
 }
 
-func buildTheaterItems(theaters []model.Theater, cityID string) []list.Item {
+func buildTheaterItems(theaters []model.Theater, cityID string, hidden map[string]bool, userLocation *service.UserLocation) []list.Item {
 	recents, _ := store.LoadRecentTheaters()
+
+	visible := make([]model.Theater, 0, len(theaters))
+	for _, theater := range theaters {
+		if hidden[theater.Id] {
+			continue
+		}
+		visible = append(visible, theater)
+	}
+
+	items := make([]list.Item, 0, len(visible))
+
+	if userLocation != nil {
+		sortTheatersByDistance(visible, userLocation)
+		for _, theater := range visible {
+			distance, hasDistance := theaterDistanceKM(theater, userLocation)
+			items = append(items, theaterItem{
+				theater:     theater,
+				recent:      isRecentTheater(theater, cityID, recents),
+				hasDistance: hasDistance,
+				distanceKM:  distance,
+			})
+		}
+		return items
+	}
+
 	byID := map[string]model.Theater{}
 	byName := map[string]model.Theater{}
-	for _, theater := range theaters {
+	for _, theater := range visible {
 		byID[theater.Id] = theater
 		byName[strings.ToLower(theater.Name)] = theater
 	}
 
-	var items []list.Item
 	used := map[string]bool{}
 	for _, recent := range recents {
 		if recent.CityID != "" && recent.CityID != cityID {
@@ -1051,8 +1539,8 @@ func buildTheaterItems(theaters []model.Theater, cityID string) []list.Item {
 		}
 	}
 
-	remaining := make([]model.Theater, 0, len(theaters))
-	for _, theater := range theaters {
+	remaining := make([]model.Theater, 0, len(visible))
+	for _, theater := range visible {
 		if !used[theater.Id] {
 			remaining = append(remaining, theater)
 		}
@@ -1064,6 +1552,29 @@ func buildTheaterItems(theaters []model.Theater, cityID string) []list.Item {
 
 	for _, theater := range remaining {
 		items = append(items, theaterItem{theater: theater})
+	}
+	return items
+}
+
+func buildTheaterVisibilityItems(theaters []model.Theater, hidden map[string]bool, userLocation *service.UserLocation) []list.Item {
+	sorted := append([]model.Theater{}, theaters...)
+	if userLocation != nil {
+		sortTheatersByDistance(sorted, userLocation)
+	} else {
+		sort.Slice(sorted, func(i, j int) bool {
+			return strings.ToLower(sorted[i].Name) < strings.ToLower(sorted[j].Name)
+		})
+	}
+
+	items := make([]list.Item, 0, len(sorted))
+	for _, theater := range sorted {
+		distance, hasDistance := theaterDistanceKM(theater, userLocation)
+		items = append(items, theaterVisibilityItem{
+			theater:     theater,
+			hidden:      hidden[theater.Id],
+			hasDistance: hasDistance,
+			distanceKM:  distance,
+		})
 	}
 	return items
 }
@@ -1080,6 +1591,23 @@ func buildMovieItems(day model.TheaterSessionDay) []list.Item {
 
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(items[i].(movieItem).movie.Title) < strings.ToLower(items[j].(movieItem).movie.Title)
+	})
+	return items
+}
+
+func buildMovieItemsFromCatalog(movies []movieAggregate) []list.Item {
+	items := make([]list.Item, 0, len(movies))
+	for _, movie := range movies {
+		items = append(items, movieItem{
+			movie:          movie.movie,
+			count:          len(movie.sessions),
+			globalSessions: movie.sessions,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		left := items[i].(movieItem).movie.Title
+		right := items[j].(movieItem).movie.Title
+		return strings.ToLower(left) < strings.ToLower(right)
 	})
 	return items
 }
@@ -1104,6 +1632,276 @@ func buildSessionItems(movie model.TheaterMovie, counts map[string]seatCount) ([
 		items = append(items, sessionItem{session: session, count: count})
 	}
 	return items, sessions
+}
+
+func buildGlobalSessionItems(sessions []sessionWithTheater, counts map[string]seatCount) ([]list.Item, []model.TheaterSession) {
+	sorted := append([]sessionWithTheater{}, sessions...)
+	sort.Slice(sorted, func(i, j int) bool {
+		a := sorted[i]
+		b := sorted[j]
+
+		if a.hasDistance && b.hasDistance && math.Abs(a.distanceKM-b.distanceKM) > 1e-6 {
+			return a.distanceKM < b.distanceKM
+		}
+		if a.hasDistance != b.hasDistance {
+			return a.hasDistance
+		}
+		if !a.session.Date.LocalDate.Equal(b.session.Date.LocalDate) {
+			return a.session.Date.LocalDate.Before(b.session.Date.LocalDate)
+		}
+		return strings.ToLower(a.theater.Name) < strings.ToLower(b.theater.Name)
+	})
+
+	items := make([]list.Item, 0, len(sorted))
+	plain := make([]model.TheaterSession, 0, len(sorted))
+	for _, entry := range sorted {
+		count := counts[entry.session.Id]
+		items = append(items, sessionItem{
+			session:     entry.session,
+			theaterName: entry.theater.Name,
+			hasDistance: entry.hasDistance,
+			distanceKM:  entry.distanceKM,
+			count:       count,
+		})
+		plain = append(plain, entry.session)
+	}
+	return items, plain
+}
+
+func (m *appModel) refreshTheaterLists() {
+	m.theaterList.SetItems(buildTheaterItems(m.theaters, m.city.Id, m.hiddenTheaters, m.userLocation))
+	m.theaterPref.SetItems(buildTheaterVisibilityItems(m.theaters, m.hiddenTheaters, m.userLocation))
+}
+
+func (m appModel) visibleTheaters() []model.Theater {
+	visible := make([]model.Theater, 0, len(m.theaters))
+	for _, theater := range m.theaters {
+		if m.hiddenTheaters[theater.Id] {
+			continue
+		}
+		visible = append(visible, theater)
+	}
+	return visible
+}
+
+func (m appModel) openMovieAcrossTheaters() (tea.Model, tea.Cmd, bool) {
+	visible := m.visibleTheaters()
+	if len(visible) == 0 {
+		return m, errCmd(errors.New("no visible theaters selected")), true
+	}
+	m.browsingAllTheaters = true
+	m.theater = model.Theater{}
+	m.state = stateLoadingSessions
+	return m, tea.Batch(m.fetchMovieCatalogCmd(m.city.Id, visible, m.date), m.spinner.Tick), true
+}
+
+func (m appModel) advanceToNextDayFromError() (tea.Model, tea.Cmd, bool) {
+	m.date = truncateDate(m.date.AddDate(0, 0, 1))
+	m.state = stateLoadingSessions
+	m.errorSuggestNextDay = false
+
+	if m.browsingAllTheaters {
+		visible := m.visibleTheaters()
+		if len(visible) == 0 {
+			return m, errWithOptionsCmd(errors.New("no visible theaters selected"), stateSelectTheater, false), true
+		}
+		return m, tea.Batch(m.fetchMovieCatalogCmd(m.city.Id, visible, m.date), m.spinner.Tick), true
+	}
+
+	if m.city.Id == "" || m.theater.Id == "" {
+		return m, errWithOptionsCmd(errors.New("select a theater before trying another date"), stateSelectTheater, false), true
+	}
+	return m, tea.Batch(m.fetchSessionsCmd(m.city.Id, m.theater.Id, m.date), m.spinner.Tick), true
+}
+
+func (m appModel) toggleTheaterVisibility() (tea.Model, tea.Cmd, bool) {
+	item, ok := m.theaterPref.SelectedItem().(theaterVisibilityItem)
+	if !ok {
+		return m, nil, true
+	}
+	hidden := !item.hidden
+	if err := store.SetTheaterHidden(m.city.Id, item.theater.Id, hidden); err != nil {
+		return m, errCmd(err), true
+	}
+	if m.hiddenTheaters == nil {
+		m.hiddenTheaters = map[string]bool{}
+	}
+	if hidden {
+		m.hiddenTheaters[item.theater.Id] = true
+	} else {
+		delete(m.hiddenTheaters, item.theater.Id)
+	}
+	if hidden && m.theater.Id == item.theater.Id {
+		m.theater = model.Theater{}
+	}
+
+	index := m.theaterPref.Index()
+	m.refreshTheaterLists()
+	if count := len(m.theaterPref.Items()); count > 0 {
+		if index >= count {
+			index = count - 1
+		}
+		m.theaterPref.Select(index)
+	}
+	return m, nil, true
+}
+
+func aggregateMovieCatalog(results <-chan theaterSessionsResult, date time.Time, userLocation *service.UserLocation) ([]movieAggregate, int, int) {
+	byMovie := map[string]*movieAggregate{}
+	failed := 0
+	ignored := 0
+
+	for result := range results {
+		if result.err != nil {
+			if service.IsNotFound(result.err) {
+				ignored++
+				continue
+			}
+			failed++
+			continue
+		}
+
+		day := selectDay(result.days, date)
+		if len(day.Movies) == 0 {
+			ignored++
+			continue
+		}
+
+		for _, movie := range day.Movies {
+			key := movieAggregateKey(movie)
+			entry := byMovie[key]
+			if entry == nil {
+				copyMovie := movie
+				copyMovie.Rooms = nil
+				entry = &movieAggregate{movie: copyMovie}
+				byMovie[key] = entry
+			}
+			for _, room := range movie.Rooms {
+				for _, session := range room.Sessions {
+					if strings.TrimSpace(session.Room) == "" {
+						session.Room = room.Name
+					}
+					distance, hasDistance := theaterDistanceKM(result.theater, userLocation)
+					entry.sessions = append(entry.sessions, sessionWithTheater{
+						session:     session,
+						theater:     result.theater,
+						hasDistance: hasDistance,
+						distanceKM:  distance,
+					})
+				}
+			}
+		}
+	}
+
+	movies := make([]movieAggregate, 0, len(byMovie))
+	for _, movie := range byMovie {
+		movies = append(movies, *movie)
+	}
+	sort.Slice(movies, func(i, j int) bool {
+		return strings.ToLower(movies[i].movie.Title) < strings.ToLower(movies[j].movie.Title)
+	})
+	return movies, failed, ignored
+}
+
+func movieAggregateKey(movie model.TheaterMovie) string {
+	if strings.TrimSpace(movie.Id) != "" {
+		return "id:" + movie.Id
+	}
+	title := strings.ToLower(strings.TrimSpace(movie.Title))
+	orig := strings.ToLower(strings.TrimSpace(movie.OriginalTitle))
+	return title + "|" + orig
+}
+
+func isRecentTheater(theater model.Theater, cityID string, recents []store.RecentTheater) bool {
+	for _, recent := range recents {
+		if recent.CityID != "" && cityID != "" && recent.CityID != cityID {
+			continue
+		}
+		if recent.TheaterID != "" && recent.TheaterID == theater.Id {
+			return true
+		}
+		if recent.Name != "" && strings.EqualFold(recent.Name, theater.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortTheatersByDistance(theaters []model.Theater, location *service.UserLocation) {
+	sort.Slice(theaters, func(i, j int) bool {
+		leftDist, leftOK := theaterDistanceKM(theaters[i], location)
+		rightDist, rightOK := theaterDistanceKM(theaters[j], location)
+		if leftOK && rightOK && math.Abs(leftDist-rightDist) > 1e-6 {
+			return leftDist < rightDist
+		}
+		if leftOK != rightOK {
+			return leftOK
+		}
+		return strings.ToLower(theaters[i].Name) < strings.ToLower(theaters[j].Name)
+	})
+}
+
+func theaterDistanceKM(theater model.Theater, location *service.UserLocation) (float64, bool) {
+	if location == nil {
+		return 0, false
+	}
+	if theater.Geolocation.Lat == 0 && theater.Geolocation.Lng == 0 {
+		return 0, false
+	}
+	distance := haversineKM(location.Latitude, location.Longitude, theater.Geolocation.Lat, theater.Geolocation.Lng)
+	return distance, true
+}
+
+func locationLabel(location *service.UserLocation) string {
+	if location == nil {
+		return ""
+	}
+	place := strings.TrimSpace(strings.Join([]string{location.City, location.Region}, ", "))
+	source := locationSourceLabel(location.Source)
+	if place != "" && source != "" {
+		return fmt.Sprintf("%s (%s)", place, source)
+	}
+	if place != "" {
+		return place
+	}
+	return source
+}
+
+func locationSourceLabel(source string) string {
+	raw := strings.TrimSpace(source)
+	if raw == "" {
+		return ""
+	}
+	normalized := strings.ToLower(raw)
+	switch normalized {
+	case "system":
+		return "via sistema"
+	case "ipapi", "ipwhois", "ipinfo":
+		return fmt.Sprintf("via IP (%s)", normalized)
+	default:
+		if strings.Contains(normalized, "ip") {
+			return fmt.Sprintf("via IP (%s)", normalized)
+		}
+		return fmt.Sprintf("via %s", raw)
+	}
+}
+
+func haversineKM(lat1 float64, lon1 float64, lat2 float64, lon2 float64) float64 {
+	const earthRadius = 6371.0
+	toRad := math.Pi / 180
+
+	lat1Rad := lat1 * toRad
+	lon1Rad := lon1 * toRad
+	lat2Rad := lat2 * toRad
+	lon2Rad := lon2 * toRad
+
+	dLat := lat2Rad - lat1Rad
+	dLon := lon2Rad - lon1Rad
+
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1Rad)*math.Cos(lat2Rad)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return earthRadius * c
 }
 
 type sectionItem struct {

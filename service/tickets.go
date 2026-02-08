@@ -15,9 +15,12 @@ import (
 )
 
 const (
-	apiBaseURL       = "https://api-content.ingresso.com/v0"
-	checkoutBaseURL  = "https://api.ingresso.com/v1"
-	defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5.2 Safari/605.1.15"
+	apiBaseURL         = "https://api-content.ingresso.com/v0"
+	checkoutBaseURL    = "https://api.ingresso.com/v1"
+	defaultUserAgent   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5.2 Safari/605.1.15"
+	defaultMaxAttempts = 3
+	defaultRetryBase   = 200 * time.Millisecond
+	defaultRetryCap    = 1200 * time.Millisecond
 )
 
 // Client wraps HTTP access to the Ingresso content API.
@@ -26,6 +29,9 @@ type Client struct {
 	baseURL     string
 	checkoutURL string
 	userAgent   string
+	maxAttempts int
+	retryBase   time.Duration
+	retryCap    time.Duration
 }
 
 // APIError is returned when the Ingresso API responds with a non-2xx status.
@@ -62,6 +68,9 @@ func NewClient(httpClient *http.Client) *Client {
 		baseURL:     apiBaseURL,
 		checkoutURL: checkoutBaseURL,
 		userAgent:   defaultUserAgent,
+		maxAttempts: defaultMaxAttempts,
+		retryBase:   defaultRetryBase,
+		retryCap:    defaultRetryCap,
 	}
 }
 
@@ -164,35 +173,110 @@ func (c *Client) GetSessionsByCityAndTheater(ctx context.Context, cityID string,
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+	maxAttempts := c.maxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
 	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Accept", "application/json")
 
-	res, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
-		snippet, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
-		return &APIError{
-			StatusCode: res.StatusCode,
-			Status:     res.Status,
-			Endpoint:   endpoint,
-			Body:       strings.TrimSpace(string(snippet)),
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return fmt.Errorf("create request: %w", err)
 		}
+		req.Header.Set("User-Agent", c.userAgent)
+		req.Header.Set("Accept", "application/json")
+
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			if c.shouldRetryNetworkError(err) && attempt < maxAttempts {
+				if waitErr := c.waitRetry(ctx, attempt); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
+			return fmt.Errorf("request failed: %w", err)
+		}
+
+		if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+			snippet, _ := io.ReadAll(io.LimitReader(res.Body, 8<<10))
+			_ = res.Body.Close()
+
+			apiErr := &APIError{
+				StatusCode: res.StatusCode,
+				Status:     res.Status,
+				Endpoint:   endpoint,
+				Body:       strings.TrimSpace(string(snippet)),
+			}
+			if c.shouldRetryStatus(res.StatusCode) && attempt < maxAttempts {
+				if waitErr := c.waitRetry(ctx, attempt); waitErr != nil {
+					return waitErr
+				}
+				continue
+			}
+			return apiErr
+		}
+
+		dec := json.NewDecoder(res.Body)
+		err = dec.Decode(out)
+		_ = res.Body.Close()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return fmt.Errorf("decode response from %s: %w", endpoint, err)
+		}
+		return nil
 	}
 
-	dec := json.NewDecoder(res.Body)
-	if err := dec.Decode(out); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		return fmt.Errorf("decode response from %s: %w", endpoint, err)
+	return errors.New("request failed after retries")
+}
+
+func (c *Client) shouldRetryStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+}
+
+func (c *Client) shouldRetryNetworkError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return nil
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func (c *Client) waitRetry(ctx context.Context, attempt int) error {
+	delay := c.retryDelay(attempt)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *Client) retryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	base := c.retryBase
+	if base <= 0 {
+		base = defaultRetryBase
+	}
+	cap := c.retryCap
+	if cap <= 0 {
+		cap = defaultRetryCap
+	}
+
+	delay := base
+	for i := 1; i < attempt; i++ {
+		if delay >= cap/2 {
+			return cap
+		}
+		delay *= 2
+	}
+	if delay > cap {
+		return cap
+	}
+	return delay
 }

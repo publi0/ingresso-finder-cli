@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -18,6 +19,7 @@ func TestGetJSON_Non2xxReturnsError(t *testing.T) {
 
 	client := NewClient(server.Client())
 	client.baseURL = server.URL
+	client.maxAttempts = 1
 
 	var out map[string]any
 	err := client.getJSON(context.Background(), server.URL+"/fail", &out)
@@ -26,6 +28,63 @@ func TestGetJSON_Non2xxReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGetJSON_RetriesTransientServerErrors(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&attempts, 1)
+		if current < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("retry later"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok": true}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client())
+	client.baseURL = server.URL
+	client.maxAttempts = 3
+	client.retryBase = time.Millisecond
+	client.retryCap = 2 * time.Millisecond
+
+	var out map[string]any
+	if err := client.getJSON(context.Background(), server.URL+"/retry", &out); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+	if ok, _ := out["ok"].(bool); !ok {
+		t.Fatalf("unexpected payload: %+v", out)
+	}
+}
+
+func TestGetJSON_DoesNotRetryOnClientErrors(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client())
+	client.baseURL = server.URL
+	client.maxAttempts = 3
+	client.retryBase = time.Millisecond
+	client.retryCap = 2 * time.Millisecond
+
+	var out map[string]any
+	err := client.getJSON(context.Background(), server.URL+"/bad-request", &out)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
 	}
 }
 
