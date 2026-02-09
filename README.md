@@ -83,3 +83,7 @@ INGRESSO_CITY="Rio de Janeiro" go run .
 ```bash
 go test ./...
 ```
+
+## Automacao da formula Homebrew
+
+A formula do tap e atualizada automaticamente via GitHub Actions a cada push na `main`.

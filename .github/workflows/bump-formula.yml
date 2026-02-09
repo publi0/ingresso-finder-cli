@@ -1,0 +1,42 @@
+name: Bump Homebrew Formula
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - Formula/ingresso-finder-cli.rb
+      - .github/workflows/bump-formula.yml
+      - scripts/update-formula.sh
+
+permissions:
+  contents: write
+
+jobs:
+  bump-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update formula commit and sha256
+        env:
+          TARGET_COMMIT: ${{ github.sha }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          ./scripts/update-formula.sh "$TARGET_COMMIT" "$REPO_SLUG"
+
+      - name: Commit formula changes
+        run: |
+          if git diff --quiet -- Formula/ingresso-finder-cli.rb; then
+            echo "No formula changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/ingresso-finder-cli.rb
+          git commit -m "chore(formula): bump to ${GITHUB_SHA::7} [skip ci]"
+          git push

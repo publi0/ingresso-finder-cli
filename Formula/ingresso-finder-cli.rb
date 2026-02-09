@@ -1,10 +1,10 @@
 class IngressoFinderCli < Formula
   desc "Use ingresso.com directly from the terminal"
   homepage "https://github.com/publi0/ingresso-finder-cli"
-  COMMIT = "eed75a56e08da9cb774d34b6ee6252e230f9e8fd"
-  url "https://codeload.github.com/publi0/ingresso-finder-cli/tar.gz/#{COMMIT}"
-  sha256 "c88a4e37893937dd03df29d78747ef15d85129a0ca8e64b83b2885fee8b3716a"
-  version "0.0.0-#{COMMIT[0,7]}"
+  COMMIT = "0d36fd59441a0bf151f416f8048ba6716fb5088a".freeze
+  url "https://github.com/publi0/ingresso-finder-cli/archive/#{COMMIT}.tar.gz"
+  version "0.0.0-#{COMMIT[0, 7]}"
+  sha256 "96dac4a536641d895ced1c0f8bedd0a2c0c642f8b590d820f2f3243b220bd580"
 
   depends_on "go" => :build
 
