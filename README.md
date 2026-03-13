@@ -4,7 +4,7 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 
 <p align="center">
   <img src="https://img.shields.io/github/go-mod/go-version/publi0/ingresso-finder-cli?style=for-the-badge" alt="Go Version">
-  <img src="https://img.shields.io/badge/homebrew-cask-orange?style=for-the-badge&logo=homebrew" alt="Homebrew">
+  <img src="https://img.shields.io/badge/homebrew-formula-orange?style=for-the-badge&logo=homebrew" alt="Homebrew">
   <a href="https://goreportcard.com/report/github.com/publi0/ingresso-finder-cli"><img src="https://goreportcard.com/badge/github.com/publi0/ingresso-finder-cli?style=for-the-badge" alt="Go Report Card"></a>
   <img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=for-the-badge" alt="License: GPL v3">
 </p>
@@ -30,12 +30,13 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 
 ## Instalação
 
-### Homebrew (Cask)
+### Homebrew (Tap)
 
-Agora você pode instalar o `ingresso-finder-cli` como um Cask diretamente do repositório:
+Como a fórmula está hospedada no repositório principal, você deve realizar o `tap` informando a URL completa:
 
 ```bash
-brew install --cask publi0/ingresso-finder-cli/ingresso-finder-cli
+brew tap publi0/ingresso-finder-cli https://github.com/publi0/ingresso-finder-cli
+brew install ingresso-finder-cli
 ```
 
 ### Binários Pré-compilados
