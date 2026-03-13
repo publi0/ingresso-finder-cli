@@ -40,7 +40,9 @@ archives:
         formats: [zip]
 
 changelog:
-  disable: true # Desativado em favor das notas automáticas do GitHub
+  # 'github-native' uses the GitHub release notes generation API,
+  # which is what you requested (auto-generated notes from GitHub).
+  use: github-native
 
 # GoReleaser v2.10+ recommends homebrew_casks for better standards,
 # though it can be used to install binaries just like Formulae.
@@ -61,4 +63,3 @@ release:
   github:
     owner: publi0
     name: ingresso-finder-cli
-    generate_release_notes: true # Usa o recurso do GitHub para gerar a mensagem da release
