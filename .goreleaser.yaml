@@ -40,24 +40,24 @@ archives:
         formats: [zip]
 
 changelog:
-  # 'github-native' uses the GitHub release notes generation API,
-  # which is what you requested (auto-generated notes from GitHub).
+  # 'github-native' uses the GitHub release notes generation API.
   use: github-native
 
-# GoReleaser v2.10+ recommends homebrew_casks for better standards,
-# though it can be used to install binaries just like Formulae.
-homebrew_casks:
+# Using brews (Formula) instead of homebrew_casks for a traditional Homebrew experience.
+brews:
   - name: ingresso-finder-cli
     repository:
       owner: publi0
       name: ingresso-finder-cli
       branch: main
-    directory: Casks
+    directory: Formula
     homepage: "https://github.com/publi0/ingresso-finder-cli"
     description: "Use ingresso.com directly from the terminal"
     license: "MIT"
-    # For Casks, we specify the binary name
-    binaries: ["ingresso"]
+    test: |
+      system "#{bin}/ingresso --version"
+    install: |
+      bin.install "ingresso"
 
 release:
   github:
