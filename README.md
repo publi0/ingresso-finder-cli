@@ -109,7 +109,11 @@ goreleaser release --snapshot --clean
 ## Licença
 
 Este projeto está licenciado sob a [GPL v3](LICENSE).
--e 
+
 ## Contribuição
 
 Contribuições são muito bem-vindas! Sinta-se à vontade para abrir issues ou enviar Pull Requests.
+-e 
+## Contribuição
+
+Contribuições são muito bem-vindas!
