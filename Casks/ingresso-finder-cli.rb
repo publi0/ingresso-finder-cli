@@ -3,7 +3,7 @@ cask "ingresso-finder-cli" do
   name "ingresso-finder-cli"
   desc "Use ingresso.com directly from the terminal"
   homepage "https://github.com/publi0/ingresso-finder-cli"
-  version "1.0.4"
+  version "1.0.6"
 
   livecheck do
     skip "Auto-generated on release."
@@ -14,22 +14,22 @@ cask "ingresso-finder-cli" do
   on_macos do
     on_intel do
       url "https://github.com/publi0/ingresso-finder-cli/releases/download/v#{version}/ingresso-finder-cli_Darwin_x86_64.tar.gz"
-      sha256 "64f58cab502f8c602cc1fd4eb9005da99fa747cf0b7ecba1d1a94bc27b2126b2"
+      sha256 "bc8cd72c6081982b83dbf1203d5f7a796e8b1395e5adafd286ffd6fe7a7b34ad"
     end
     on_arm do
       url "https://github.com/publi0/ingresso-finder-cli/releases/download/v#{version}/ingresso-finder-cli_Darwin_arm64.tar.gz"
-      sha256 "ec4c2eae877bbe63a42083b63c3ddd5a7900f795987f70adb39a0d1ea6bd639b"
+      sha256 "25bc9eb0ceb10b30c91847e5605dfa44826dfe31ebc467a6f939a4b955e9fc41"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/publi0/ingresso-finder-cli/releases/download/v#{version}/ingresso-finder-cli_Linux_x86_64.tar.gz"
-      sha256 "90822c29199a295b6fa7cf549440a80d1fce2760c306e594cfa8fec340218e6c"
+      sha256 "819dafd7ce57be9c5024ea99b14b068d67f1bcbbacdcc38f98d8cec957ac6951"
     end
     on_arm do
       url "https://github.com/publi0/ingresso-finder-cli/releases/download/v#{version}/ingresso-finder-cli_Linux_arm64.tar.gz"
-      sha256 "95da8800d886018876b3a493ff7afed1fd0ab08889d702befd351f5a818b740f"
+      sha256 "84f8bc34647d8ea4469d8cb565e33d0bc38734ab6d08b3645eb9ea49bdd82555"
     end
   end
 
