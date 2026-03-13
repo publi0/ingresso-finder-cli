@@ -2,6 +2,13 @@
 
 TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com histórico local e cache para acelerar as consultas.
 
+<p align="center">
+  <img src="https://img.shields.io/github/go-mod/go-version/publi0/ingresso-finder-cli?style=for-the-badge" alt="Go Version">
+  <img src="https://img.shields.io/badge/homebrew-v1.0.0-orange?style=for-the-badge&logo=homebrew" alt="Homebrew">
+  <a href="https://goreportcard.com/report/github.com/publi0/ingresso-finder-cli"><img src="https://goreportcard.com/badge/github.com/publi0/ingresso-finder-cli?style=for-the-badge" alt="Go Report Card"></a>
+  <img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=for-the-badge" alt="License: GPL v3">
+</p>
+
 ![Demo](assets/demo.gif)
 
 ## Visão Geral
