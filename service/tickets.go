@@ -173,10 +173,7 @@ func (c *Client) GetSessionsByCityAndTheater(ctx context.Context, cityID string,
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
-	maxAttempts := c.maxAttempts
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
+	maxAttempts := max(c.maxAttempts, 1)
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

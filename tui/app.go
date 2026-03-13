@@ -522,19 +522,19 @@ func (m appModel) headerView() string {
 		}
 	}
 
-	breadcrumbView := ""
+	var breadcrumbView strings.Builder
 	for i, part := range bc {
 		style := breadcrumbStyle
 		if i == len(bc)-1 {
 			style = activeBreadcrumbStyle
 		}
-		breadcrumbView += style.Render(strings.ToUpper(part))
+		breadcrumbView.WriteString(style.Render(strings.ToUpper(part)))
 		if i < len(bc)-1 {
-			breadcrumbView += separatorStyle.Render(">")
+			breadcrumbView.WriteString(separatorStyle.Render(">"))
 		}
 	}
 
-	leftSide := lipgloss.JoinHorizontal(lipgloss.Center, title, breadcrumbView)
+	leftSide := lipgloss.JoinHorizontal(lipgloss.Center, title, breadcrumbView.String())
 
 	// Metadata Line (Date, Location, Mode)
 	meta := []string{}
@@ -656,10 +656,7 @@ func (m appModel) errorRecoveryView() string {
 		BorderForeground(lipgloss.Color("63")).
 		MarginTop(1)
 	if m.width > 56 {
-		cardWidth := m.width - 8
-		if cardWidth > 84 {
-			cardWidth = 84
-		}
+		cardWidth := min(m.width-8, 84)
 		panelStyle = panelStyle.Width(cardWidth)
 	}
 	panel := panelStyle.Render(content)
@@ -975,10 +972,7 @@ func (m *appModel) resizeLists() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	h := m.height - 6
-	if h < 6 {
-		h = 6
-	}
+	h := max(m.height-6, 6)
 	m.cityList.SetSize(m.width, h)
 	m.theaterList.SetSize(m.width, h)
 	m.theaterPref.SetSize(m.width, h)
@@ -1284,7 +1278,7 @@ func (d dateItem) FilterValue() string {
 func buildDateItems(base time.Time) []list.Item {
 	start := truncateDate(base)
 	items := make([]list.Item, 0, 5)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		items = append(items, dateItem{date: start.AddDate(0, 0, i)})
 	}
 	return items
