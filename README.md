@@ -9,11 +9,13 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 - Fluxo guiado: cidade → cinema → filmes → sessões.
 - Opção alternativa: buscar por filme em todos os cinemas visíveis.
 - Busca incremental em todas as listas.
-- Cache local para reduzir chamadas repetidas.
+- **Painel lateral de metadados**: veja sinopses, duração, gêneros e classificação indicativa dos filmes.
+- **Integração com IMDb (OMDb API)**: veja as notas de avaliação e diretores sem sair do terminal.
+- Cache local inteligente para reduzir chamadas repetidas (Filmes, Sessões e Metadados do OMDb).
 - Retry automático com backoff para erros transitórios da API.
 - Preferências globais de visibilidade de cinemas (mostrar/ocultar).
 - Ordenação por proximidade usando localização nativa do sistema (quando disponível), com fallback por IP.
-- Mapa de assentos quando o endpoint público está disponível.
+- Mapa de assentos com interface gráfica colorida, indicando cadeiras ideais, acessibilidade e taxa de ocupação.
 
 ## Requisitos
 
@@ -59,8 +61,11 @@ INGRESSO_CITY="Rio de Janeiro" go run .
 
 ## Configuração
 
+A ferramenta pode ser aprimorada através de variáveis de ambiente:
+
 - `INGRESSO_CITY` define a cidade inicial e pula a tela de seleção.
 - `INGRESSO_LOCATION_DEBUG=1` imprime no stderr o motivo de fallback de localização (quando a API nativa falha).
+- `OMDB_API_KEY` chave da API gratuita do [OMDb](https://www.omdbapi.com/) para carregar notas do IMDb, diretores e gêneros dos filmes.
 
 ## Atalhos
 

@@ -13,138 +13,15 @@ import (
 	"sync"
 	"time"
 
+	"ingresso-finder-cli/model"
+	"ingresso-finder-cli/service"
+	"ingresso-finder-cli/store"
+
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"ingresso-finder-cli/model"
-	"ingresso-finder-cli/service"
-	"ingresso-finder-cli/store"
 )
-
-type appState int
-
-const (
-	stateLoadingCities appState = iota
-	stateSelectCity
-	stateLoadingTheaters
-	stateSelectTheater
-	stateLoadingSessions
-	stateSelectMovie
-	stateShowSessions
-	stateSelectDate
-	stateLoadingSeatMap
-	stateSelectSection
-	stateShowSeatMap
-	stateManageTheaters
-	stateError
-)
-
-type appModel struct {
-	client *service.Client
-
-	state     appState
-	lastState appState
-	err       error
-
-	width  int
-	height int
-
-	cities   []model.City
-	theaters []model.Theater
-	days     []model.TheaterSessionDay
-
-	city    model.City
-	theater model.Theater
-	date    time.Time
-
-	dateReturnState    appState
-	dateReturnStateSet bool
-
-	cityList    list.Model
-	theaterList list.Model
-	theaterPref list.Model
-	movieList   list.Model
-	sessionList list.Model
-	sectionList list.Model
-	dateList    list.Model
-
-	seatMap         model.SeatMap
-	selectedSession model.TheaterSession
-	selectedSection model.SessionSection
-	showSeatNumbers bool
-
-	spinner spinner.Model
-
-	seatCounts map[string]seatCount
-
-	hiddenTheaters      map[string]bool
-	userLocation        *service.UserLocation
-	browsingAllTheaters bool
-
-	errorSuggestNextDay bool
-}
-
-type errMsg struct {
-	err            error
-	returnState    appState
-	returnStateSet bool
-	suggestNextDay bool
-}
-
-type citiesMsg struct {
-	cities []model.City
-	err    error
-}
-
-type cityMsg struct {
-	city model.City
-	err  error
-}
-
-type theatersMsg struct {
-	theaters []model.Theater
-	err      error
-}
-
-type sessionsMsg struct {
-	days []model.TheaterSessionDay
-	err  error
-}
-
-type seatCountMsg struct {
-	sessionID string
-	count     seatCount
-}
-
-type sessionDetailsMsg struct {
-	detail model.SessionDetail
-	err    error
-}
-
-type seatMapMsg struct {
-	seatMap model.SeatMap
-	err     error
-}
-
-type movieCatalogMsg struct {
-	movies     []movieAggregate
-	err        error
-	failed     int
-	ignored    int
-	noSessions bool
-}
-
-type locationMsg struct {
-	location service.UserLocation
-	err      error
-}
-
-type theaterSessionsResult struct {
-	theater model.Theater
-	days    []model.TheaterSessionDay
-	err     error
-}
 
 func New() tea.Model {
 	client := service.NewClient(nil)
@@ -164,6 +41,7 @@ func New() tea.Model {
 
 	m.showSeatNumbers = true
 	m.seatCounts = make(map[string]seatCount)
+	m.movieRatings = make(map[string]store.OMDbRating)
 	m.hiddenTheaters = make(map[string]bool)
 
 	sp := spinner.New()
@@ -227,6 +105,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateError
 		return m, nil
 
+	case omdbRatingMsg:
+		if msg.err == nil {
+			m.movieRatings[msg.title] = msg.rating
+		}
+		return m, nil
+
 	case citiesMsg:
 		if msg.err != nil {
 			return m, errCmd(msg.err)
@@ -275,11 +159,16 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				true,
 			)
 		}
-		m.browsingAllTheaters = false
 		m.movieList.Title = "Select Movie"
 		m.movieList.SetItems(buildMovieItems(selectDay(m.days, m.date)))
 		m.state = stateSelectMovie
-		return m, nil
+		var cmd tea.Cmd
+		if m.movieList.SelectedItem() != nil {
+			if item, ok := m.movieList.SelectedItem().(movieItem); ok {
+				cmd = fetchMovieRatingCmd(item.movie.Title, item.movie.OriginalTitle)
+			}
+		}
+		return m, cmd
 
 	case movieCatalogMsg:
 		if msg.err != nil {
@@ -289,7 +178,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.movieList.Title = "Select Movie • All Theaters"
 		m.movieList.SetItems(buildMovieItemsFromCatalog(msg.movies))
 		m.state = stateSelectMovie
-		return m, nil
+		var cmd tea.Cmd
+		if m.movieList.SelectedItem() != nil {
+			if item, ok := m.movieList.SelectedItem().(movieItem); ok {
+				cmd = fetchMovieRatingCmd(item.movie.Title, item.movie.OriginalTitle)
+			}
+		}
+		return m, cmd
 
 	case locationMsg:
 		if msg.err != nil {
@@ -335,6 +230,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
+	var oldSelectedTitle string
+	if m.state == stateSelectMovie && m.movieList.SelectedItem() != nil {
+		if item, ok := m.movieList.SelectedItem().(movieItem); ok {
+			oldSelectedTitle = item.movie.Title
+		}
+	}
+
 	switch m.state {
 	case stateSelectCity:
 		m.cityList, cmd = m.cityList.Update(msg)
@@ -357,96 +259,344 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateSelectDate:
 		m.dateList, cmd = m.dateList.Update(msg)
 	}
+
+	if m.state == stateSelectMovie && m.movieList.SelectedItem() != nil {
+		if item, ok := m.movieList.SelectedItem().(movieItem); ok {
+			if oldSelectedTitle != item.movie.Title {
+				// Cursor mudou de filme, disparamos a busca em background
+				return m, tea.Batch(cmd, fetchMovieRatingCmd(item.movie.Title, item.movie.OriginalTitle))
+			}
+		}
+	}
+
 	return m, cmd
+}
+
+type omdbRatingMsg struct {
+	title  string
+	rating store.OMDbRating
+	err    error
+}
+
+func fetchMovieRatingCmd(title, originalTitle string) tea.Cmd {
+	return func() tea.Msg {
+		// Verifica se já temos no cache
+		if rating, ok := store.LoadMovieRating(title); ok {
+			return omdbRatingMsg{title: title, rating: rating}
+		}
+
+		// Tenta buscar na API
+		data, err := service.FetchMovieData(title, originalTitle)
+		if err != nil {
+			if strings.Contains(err.Error(), "Movie not found!") {
+				rating := store.OMDbRating{NotFound: true}
+				_ = store.SaveMovieRating(title, rating)
+				return omdbRatingMsg{title: title, rating: rating}
+			}
+			return omdbRatingMsg{title: title, err: err}
+		}
+
+		var rotten string
+		for _, r := range data.Ratings {
+			if r.Source == "Rotten Tomatoes" {
+				rotten = r.Value
+				break
+			}
+		}
+
+		rating := store.OMDbRating{
+			ImdbRating: data.ImdbRating,
+			Metascore:  data.Metascore,
+			Rotten:     rotten,
+			Genre:      data.Genre,
+			Director:   data.Director,
+			Plot:       data.Plot,
+		}
+
+		// Salva no cache
+		_ = store.SaveMovieRating(title, rating)
+
+		return omdbRatingMsg{title: title, rating: rating}
+	}
 }
 
 func (m appModel) View() string {
 	header := m.headerView()
+	content := ""
+
 	switch m.state {
 	case stateLoadingCities, stateLoadingTheaters, stateLoadingSessions, stateLoadingSeatMap:
-		return header + "\n\n" + m.loadingView()
+		content = m.loadingView()
 	case stateSelectCity:
-		return header + "\n\n" + m.cityList.View()
+		content = m.cityList.View()
 	case stateSelectTheater:
-		return header + "\n\n" + m.theaterList.View()
+		content = m.theaterList.View()
 	case stateManageTheaters:
-		return header + "\n\n" + m.theaterPref.View()
+		content = m.theaterPref.View()
 	case stateSelectMovie:
-		return header + "\n\n" + m.movieList.View()
+		content = m.renderSplitView(m.movieList.View())
 	case stateShowSessions:
-		return header + "\n\n" + m.sessionList.View()
+		content = m.renderSplitView(m.sessionList.View())
 	case stateSelectSection:
-		return header + "\n\n" + m.sectionList.View()
+		content = m.sectionList.View()
 	case stateShowSeatMap:
-		return header + "\n\n" + m.renderSeatMap()
+		content = m.renderSeatMap()
 	case stateSelectDate:
-		return header + "\n\n" + m.dateList.View()
+		content = m.dateList.View()
 	case stateError:
 		if m.errorSuggestNextDay {
-			return header + "\n\n" + m.errorRecoveryView()
+			content = m.errorRecoveryView()
+		} else {
+			content = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(m.err.Error())
 		}
-		return header + "\n\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(m.err.Error()) + "\n\n" + hint("Press esc to go back or ctrl+c to quit.")
-	default:
-		return header
 	}
+
+	return header + "\n" + content
+}
+
+func (m appModel) renderSplitView(left string) string {
+	if m.width < 80 {
+		return left
+	}
+
+	leftWidth := int(float64(m.width) * 0.4)
+	rightWidth := m.width - leftWidth - 2
+
+	leftStyle := lipgloss.NewStyle().Width(leftWidth)
+	rightStyle := lipgloss.NewStyle().
+		Width(rightWidth).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("240")).
+		PaddingLeft(2)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(left), rightStyle.Render(m.renderMovieDetail(rightWidth-2)))
+}
+
+func (m appModel) renderMovieDetail(maxWidth int) string {
+	item := m.movieList.SelectedItem()
+	if item == nil {
+		return ""
+	}
+
+	movieItem, ok := item.(movieItem)
+	if !ok {
+		return ""
+	}
+
+	movie := movieItem.movie
+
+	// Styles
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).MarginBottom(1)
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Width(15)
+	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+
+	// Rating Badge
+	var ratingBadge string
+	switch movie.ContentRating {
+	case "L", "Livre":
+		ratingBadge = lipgloss.NewStyle().Background(lipgloss.Color("42")).Foreground(lipgloss.Color("0")).Bold(true).Padding(0, 1).Render("Livre")
+	case "10", "12", "14", "10 anos", "12 anos", "14 anos":
+		ratingBadge = lipgloss.NewStyle().Background(lipgloss.Color("214")).Foreground(lipgloss.Color("0")).Bold(true).Padding(0, 1).Render(movie.ContentRating)
+	default:
+		ratingBadge = lipgloss.NewStyle().Background(lipgloss.Color("196")).Foreground(lipgloss.Color("255")).Bold(true).Padding(0, 1).Render(movie.ContentRating)
+	}
+
+	// Content Builder
+	content := titleStyle.Render("🎬 "+movie.Title) + "\n\n"
+
+	// Metadata Table
+	if movie.OriginalTitle != "" && !strings.EqualFold(movie.OriginalTitle, movie.Title) {
+		content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Original:"), valueStyle.Render(movie.OriginalTitle)) + "\n\n"
+	}
+
+	content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Classificação:"), ratingBadge) + "\n\n"
+
+	if movie.Duration != "" {
+		content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Duração:"), valueStyle.Render("⏱️ "+movie.Duration+" min")) + "\n\n"
+	}
+
+	// Session Types Extraction
+	if len(movie.Rooms) > 0 {
+		typesMap := make(map[string]bool)
+		for _, room := range movie.Rooms {
+			for _, session := range room.Sessions {
+				for _, t := range session.Type {
+					typesMap[t] = true
+				}
+			}
+		}
+
+		if len(typesMap) > 0 {
+			var types []string
+			for t := range typesMap {
+				types = append(types, t)
+			}
+			sort.Strings(types)
+
+			typeStyle := lipgloss.NewStyle().Background(lipgloss.Color("237")).Foreground(lipgloss.Color("229")).Padding(0, 1).MarginRight(1)
+			var renderedTypes []string
+			for _, t := range types {
+				renderedTypes = append(renderedTypes, typeStyle.Render(t))
+			}
+			typeTags := lipgloss.JoinHorizontal(lipgloss.Top, renderedTypes...)
+			content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Formatos:"), typeTags) + "\n\n"
+		}
+	}
+
+	// Theaters Count (for Global Search)
+	if len(movieItem.globalSessions) > 0 {
+		theaters := make(map[string]bool)
+		for _, s := range movieItem.globalSessions {
+			theaters[s.theater.Name] = true
+		}
+		content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Cinemas:"), valueStyle.Render(fmt.Sprintf("🍿 Disponível em %d locais", len(theaters)))) + "\n\n"
+	}
+
+	if rating, ok := m.movieRatings[movie.Title]; ok {
+		if rating.NotFound {
+			content += lipgloss.NewStyle().Faint(true).Italic(true).Render("Filme não encontrado no IMDb.") + "\n\n"
+		} else {
+			var ratings []string
+			if rating.ImdbRating != "" && rating.ImdbRating != "N/A" {
+				ratings = append(ratings, "⭐ "+rating.ImdbRating+"/10")
+			}
+			if rating.Rotten != "" && rating.Rotten != "N/A" {
+				ratings = append(ratings, "🍅 "+rating.Rotten)
+			}
+
+			if len(ratings) > 0 {
+				content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Notas:"), valueStyle.Render(strings.Join(ratings, "   "))) + "\n\n"
+			}
+
+			if rating.Genre != "" && rating.Genre != "N/A" {
+				content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Gênero:"), valueStyle.Render(rating.Genre)) + "\n\n"
+			}
+			if rating.Director != "" && rating.Director != "N/A" {
+				content += lipgloss.JoinHorizontal(lipgloss.Top, labelStyle.Render("Diretor:"), valueStyle.Render(rating.Director)) + "\n\n"
+			}
+
+			if rating.Plot != "" && rating.Plot != "N/A" {
+				plotStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("250")).
+					Width(maxWidth).
+					MarginTop(1)
+				content += plotStyle.Render(rating.Plot) + "\n\n"
+			}
+		}
+	} else if os.Getenv("OMDB_API_KEY") == "" {
+		content += lipgloss.NewStyle().Faint(true).Italic(true).Render("Dica: Defina a env OMDB_API_KEY para ver notas e detalhes.") + "\n\n"
+	}
+
+	return content
 }
 
 func (m appModel) headerView() string {
-	title := lipgloss.NewStyle().Bold(true).Render("Ingresso TUI")
-	sub := []string{}
+	// Styles
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("229")).
+		Background(lipgloss.Color("63")).
+		Padding(0, 1).
+		MarginRight(1)
+
+	breadcrumbStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	separatorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 1)
+	activeBreadcrumbStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+
+	// Title
+	title := titleStyle.Render("INGRESSO")
+
+	// Breadcrumbs
+	bc := []string{}
 	if m.city.Name != "" {
-		sub = append(sub, fmt.Sprintf("City: %s", m.city.Name))
+		bc = append(bc, m.city.Name)
 	}
 	if m.theater.Name != "" {
-		sub = append(sub, fmt.Sprintf("Theater: %s", m.theater.Name))
+		bc = append(bc, m.theater.Name)
 	}
-	if m.browsingAllTheaters {
-		sub = append(sub, "Mode: movie across theaters")
+	if m.state == stateShowSessions || m.state == stateShowSeatMap {
+		if m.movieList.SelectedItem() != nil {
+			if movie, ok := m.movieList.SelectedItem().(movieItem); ok {
+				bc = append(bc, movie.movie.Title)
+			}
+		}
+	}
+
+	breadcrumbView := ""
+	for i, part := range bc {
+		style := breadcrumbStyle
+		if i == len(bc)-1 {
+			style = activeBreadcrumbStyle
+		}
+		breadcrumbView += style.Render(strings.ToUpper(part))
+		if i < len(bc)-1 {
+			breadcrumbView += separatorStyle.Render(">")
+		}
+	}
+
+	leftSide := lipgloss.JoinHorizontal(lipgloss.Center, title, breadcrumbView)
+
+	// Metadata Line (Date, Location, Mode)
+	meta := []string{}
+	if !m.date.IsZero() {
+		meta = append(meta, fmt.Sprintf("📅 %s", m.date.Format("02/01")))
 	}
 	if m.userLocation != nil {
 		label := locationLabel(m.userLocation)
 		if label != "" {
-			sub = append(sub, "Location: "+label)
+			meta = append(meta, "📍 "+label)
 		}
 	}
-	if !m.date.IsZero() && (m.state == stateSelectCity || m.state == stateSelectTheater || m.state == stateManageTheaters || m.state == stateSelectMovie || m.state == stateShowSessions || m.state == stateSelectDate || m.state == stateShowSeatMap) {
-		sub = append(sub, fmt.Sprintf("Date: %s", m.date.Format(time.DateOnly)))
+	if m.browsingAllTheaters {
+		meta = append(meta, "🌐 Todos os Cinemas")
 	}
-	if m.state == stateShowSeatMap || m.state == stateSelectSection {
-		if !m.selectedSession.Date.LocalDate.IsZero() {
-			sub = append(sub, fmt.Sprintf("Session: %s", m.selectedSession.Date.LocalDate.Format("15:04")))
+
+	rightSide := ""
+	if len(meta) > 0 {
+		rightSide = lipgloss.NewStyle().Faint(true).Render(strings.Join(meta, "  •  "))
+	}
+
+	headerLine := leftSide
+	if m.width > 0 {
+		leftWidth := lipgloss.Width(leftSide)
+		rightWidth := lipgloss.Width(rightSide)
+		padding := m.width - leftWidth - rightWidth - 2
+		if padding > 0 {
+			headerLine = lipgloss.JoinHorizontal(lipgloss.Top, leftSide, strings.Repeat(" ", padding), rightSide)
+		} else {
+			headerLine = leftSide + "\n" + rightSide
 		}
-		if m.selectedSection.Name != "" {
-			sub = append(sub, fmt.Sprintf("Section: %s", m.selectedSection.Name))
-		}
+	} else {
+		headerLine = leftSide + "  " + rightSide
 	}
-	meta := strings.Join(sub, " • ")
-	if meta != "" {
-		meta = "\n" + lipgloss.NewStyle().Faint(true).Render(meta)
+
+	// Dynamic Help/Hints
+	hints := []string{"q sair", "esc voltar", "ctrl+d data"}
+	switch m.state {
+	case stateSelectTheater:
+		hints = append(hints, "enter selecionar", "ctrl+f buscar filme", "ctrl+t gerenciar", "ctrl+l localizar")
+	case stateShowSessions:
+		hints = append(hints, "enter checkout", "tab assentos")
+	case stateManageTheaters:
+		hints = append(hints, "enter/x alternar")
+	case stateShowSeatMap:
+		hints = append(hints, "n números")
 	}
-	hints := "ctrl+c quit • esc back • type to filter • ctrl+d pick date"
-	if m.state == stateSelectTheater {
-		hints = "ctrl+c quit • esc back • type to filter • ctrl+d pick date • enter select • ctrl+f movie across theaters • ctrl+t manage theaters • ctrl+l detect location"
-	}
-	if m.state == stateShowSessions {
-		hints = "ctrl+c quit • esc back • type to filter • ctrl+d pick date • enter open checkout • tab seat map"
-	}
-	if m.state == stateManageTheaters {
-		hints = "ctrl+c quit • esc back • type to filter • enter/x toggle theater visibility"
-	}
-	if m.state == stateSelectDate {
-		hints = "ctrl+c quit • esc back • enter select date"
-	}
-	if m.state == stateShowSeatMap {
-		hints = "ctrl+c quit • esc back • n toggle numbers"
-	}
+
+	// Filter status
 	filterLine := ""
 	if listPtr := m.activeList(); listPtr != nil {
 		if filter := listPtr.FilterValue(); filter != "" {
-			filterLine = "\n" + hint(fmt.Sprintf("Filter: %s", filter))
+			filterLine = "\n" + lipgloss.NewStyle().
+				Foreground(lipgloss.Color("63")).
+				Italic(true).
+				Render(fmt.Sprintf("🔍 filtrando por: %s", filter))
 		}
 	}
-	return title + meta + filterLine + "\n" + hint(hints)
+
+	helpLine := "\n" + hint(strings.Join(hints, " • "))
+
+	return "\n" + headerLine + filterLine + helpLine + "\n"
 }
 
 func (m appModel) errorRecoveryView() string {
@@ -528,7 +678,7 @@ func (m appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return m, tea.Quit, true
 	case "esc":
 		if listPtr := m.activeList(); listPtr != nil {
-			if listPtr.SettingFilter() || listPtr.IsFiltered() {
+			if listPtr.SettingFilter() {
 				listPtr.ResetFilter()
 				if m.state == stateShowSessions {
 					return m, m.startSeatCountFetchForVisiblePage(), true
@@ -2111,15 +2261,36 @@ func (m appModel) renderSeatMap() string {
 	b.WriteString(hint("Front / Screen"))
 	b.WriteString("\n\n")
 
-	legend := "Legend: [] available • XX occupied • DD accessibility • ## blocked • front rows (not ideal)"
-	if m.showSeatNumbers {
-		legend = "Legend: color shows status • numbers are seat labels • front rows in yellow"
+	// Styles for Legend
+	availStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))   // Green
+	occStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))    // Red
+	accessStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange
+	blockStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))  // Grey
+	frontStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226"))  // Yellow
+
+	legendParts := []string{
+		availStyle.Render("● Livre"),
+		occStyle.Render("✖ Ocupado"),
+		accessStyle.Render("♿ Acessível"),
+		blockStyle.Render("◼ Bloqueado"),
+		frontStyle.Render("▼ Frente"),
 	}
+	legend := strings.Join(legendParts, "  ")
+
+	if m.showSeatNumbers {
+		legend += "  " + lipgloss.NewStyle().Faint(true).Render("(Números ativados)")
+	}
+
 	percent := float64(available) / float64(max(1, total)) * 100
 	ideal := max(0, available-nonIdealAvailable)
 	pairs := countAdjacentPairs(m.seatMap)
-	counts := fmt.Sprintf("Available: %d • Ideal: %d • Front: %d • Pairs: %d • Occupied: %d • Blocked: %d • Total: %d • %.0f%% available", available, ideal, nonIdealAvailable, pairs, occupied, blocked, total, percent)
-	return b.String() + hint(legend) + "\n" + hint(counts)
+
+	counts := fmt.Sprintf(
+		"Disponíveis: %d (%d ideais)  •  Duplas: %d  •  Total: %d (%.0f%%)",
+		available, ideal, pairs, total, percent,
+	)
+
+	return b.String() + "\n" + legend + "\n" + hint(counts)
 }
 
 func seatToken(seat model.Seat) (string, string) {
