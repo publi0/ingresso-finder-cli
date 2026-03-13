@@ -4,7 +4,7 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 
 <p align="center">
   <img src="https://img.shields.io/github/go-mod/go-version/publi0/ingresso-finder-cli?style=for-the-badge" alt="Go Version">
-  <img src="https://img.shields.io/badge/homebrew-v1.0.0-orange?style=for-the-badge&logo=homebrew" alt="Homebrew">
+  <img src="https://img.shields.io/badge/homebrew-cask-orange?style=for-the-badge&logo=homebrew" alt="Homebrew">
   <a href="https://goreportcard.com/report/github.com/publi0/ingresso-finder-cli"><img src="https://goreportcard.com/badge/github.com/publi0/ingresso-finder-cli?style=for-the-badge" alt="Go Report Card"></a>
   <img src="https://img.shields.io/badge/License-GPLv3-blue.svg?style=for-the-badge" alt="License: GPL v3">
 </p>
@@ -26,16 +26,21 @@ TUI para buscar cinemas e sessões do Ingresso.com direto no terminal, com hist�
 
 ## Requisitos
 
-- Go 1.25+
+- Go 1.26.1+
 
 ## Instalação
 
-### Homebrew (tap)
+### Homebrew (Cask)
+
+Agora você pode instalar o `ingresso-finder-cli` como um Cask diretamente do repositório:
 
 ```bash
-brew tap publi0/ingresso-finder-cli https://github.com/publi0/ingresso-finder-cli
-brew install publi0/ingresso-finder-cli/ingresso-finder-cli
+brew install --cask publi0/ingresso-finder-cli/ingresso-finder-cli
 ```
+
+### Binários Pré-compilados
+
+Binários para Linux, macOS (Intel/Apple Silicon) e Windows estão disponíveis na página de [Releases](https://github.com/publi0/ingresso-finder-cli/releases).
 
 ### Build local
 
@@ -46,7 +51,7 @@ go build -o ingresso
 ## Uso
 
 ```bash
-# via Homebrew
+# via Homebrew ou binário no PATH
 ingresso
 
 # build local
@@ -56,9 +61,6 @@ ingresso
 ## Exemplos de comandos
 
 ```bash
-# executa direto do binário
-ingresso
-
 # define cidade inicial
 INGRESSO_CITY="Sao Paulo" ingresso
 
@@ -88,14 +90,22 @@ A ferramenta pode ser aprimorada através de variáveis de ambiente:
 - `enter` abre o checkout no navegador na tela de sessões.
 - `tab` abre o mapa de assentos quando disponível.
 - `n` alterna o modo de exibição de números no mapa de assentos.
-- Em erros de "sem sessões", `enter` tenta automaticamente o próximo dia e `ctrl+d` abre o seletor para escolher qualquer data.
 
 ## Desenvolvimento
 
+O projeto utiliza **GoReleaser** para automação de builds e releases.
+
 ```bash
+# Rodar testes
 go test ./...
+
+# Validar configuração do GoReleaser
+goreleaser check
+
+# Gerar release local (snapshot)
+goreleaser release --snapshot --clean
 ```
 
-## Automacao da formula Homebrew
+## Licença
 
-A formula do tap e atualizada automaticamente via GitHub Actions a cada push na `main`.
+Este projeto está licenciado sob a [GPL v3](LICENSE).

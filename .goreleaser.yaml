@@ -1,0 +1,67 @@
+# .goreleaser.yaml
+# See https://goreleaser.com for documentation
+
+version: 2
+
+project_name: ingresso-finder-cli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./main.go
+    binary: ingresso
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    # this name template makes the replacements be lowercase based on the name of the envar
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+# GoReleaser v2.10+ recommends homebrew_casks for better standards,
+# though it can be used to install binaries just like Formulae.
+homebrew_casks:
+  - name: ingresso-finder-cli
+    repository:
+      owner: publi0
+      name: ingresso-finder-cli
+      branch: main
+    directory: Casks
+    homepage: "https://github.com/publi0/ingresso-finder-cli"
+    description: "Use ingresso.com directly from the terminal"
+    license: "MIT"
+    # For Casks, we specify the binary name
+    binaries: ["ingresso"]
+
+release:
+  github:
+    owner: publi0
+    name: ingresso-finder-cli
